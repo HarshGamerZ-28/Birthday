@@ -489,7 +489,8 @@ const mk = (o) => ({
   id: o.id, slug: o.slug, name: o.name, nickname: o.nickname || "", date: o.date, relationship: o.relationship || "Friend",
   theme: o.theme || "rose", backdrop: o.backdrop || "aurora", spark: o.spark || "confetti",
   subtitle: o.subtitle, message: o.message, quote: o.quote || "", finalNote: o.finalNote || "",
-  music: o.music !== false, cake: o.cake !== false, scratch: o.scratch !== false,
+  music: o.music !== false, musicSrc: o.musicSrc || "", musicName: o.musicName || "",
+  cake: o.cake !== false, scratch: o.scratch !== false,
   lockUntilBirthday: Boolean(o.lockUntilBirthday), from: o.from || "Aarav",
   photo: o.photo || artwork(o.slug + "-p", o.theme || "rose", initials(o.name)),
   memories: (o.memories || []).map((m, i) => ({ id: o.slug + "-m" + i, src: m.src || artwork(o.slug + "-m" + i, o.theme || "rose"), caption: m.caption })),
@@ -766,67 +767,134 @@ function Backdrop({ theme, kind, contained }) {
   );
 }
 
-/* ============================ MUSIC ============================ */
-function useSong() {
-  const ctxRef = useRef(null), gainRef = useRef(null), timer = useRef(null), step = useRef(0);
+/* ============================ MUSIC ============================
+   Two sources: a soft music-box melody synthesised in the browser
+   (no file, no loading, works offline), or the sender's own audio. */
+
+/* A slow lullaby phrase in C major pentatonic. null = a rest, which is
+   what keeps it from sounding like an app notification. */
+const MOTIF = [12, 9, 7, 9, 12, 16, 14, 12, null, 9, 7, 4, 7, 9, 7, 4, 2, 0, null, 4];
+const STEP_MS = 700;
+
+function useSong(src) {
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
+  const audio = useRef(null);
+  const kit = useRef(null);          // web-audio graph
+  const timer = useRef(null), step = useRef(0);
+
+  const vol = () => (muted ? 0.0001 : 0.14);
 
   const stop = useCallback(() => {
     clearInterval(timer.current); timer.current = null;
-    if (gainRef.current) { try { gainRef.current.gain.linearRampToValueAtTime(0.0001, ctxRef.current.currentTime + 0.4); } catch (e) {} }
+    if (audio.current) { audio.current.pause(); }
+    const k = kit.current;
+    if (k) { try { k.master.gain.linearRampToValueAtTime(0.0001, k.ctx.currentTime + 0.6); } catch (e) {} }
     setPlaying(false);
   }, []);
 
   const start = useCallback(() => {
+    /* the sender's own track */
+    if (src) {
+      try {
+        if (!audio.current) {
+          audio.current = new Audio(src);
+          audio.current.loop = true;
+          audio.current.preload = "auto";
+        }
+        audio.current.volume = muted ? 0 : 0.55;
+        const pr = audio.current.play();
+        if (pr && pr.catch) pr.catch(() => setPlaying(false));
+        setPlaying(true);
+      } catch (e) { setPlaying(false); }
+      return;
+    }
+
+    /* the built-in music box */
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
-      if (!ctxRef.current) {
-        ctxRef.current = new AC();
-        gainRef.current = ctxRef.current.createGain();
-        gainRef.current.connect(ctxRef.current.destination);
-      }
-      const ctx = ctxRef.current;
-      if (ctx.state === "suspended") ctx.resume();
-      gainRef.current.gain.setValueAtTime(0.0001, ctx.currentTime);
-      gainRef.current.gain.linearRampToValueAtTime(muted ? 0.0001 : 0.16, ctx.currentTime + 1.1);
-      const scale = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21];
-      const play = () => {
-        const n = scale[step.current % scale.length] + (step.current % 20 > 9 ? -5 : 0);
-        const f = 261.63 * Math.pow(2, n / 12);
-        [f, f * 2].forEach((freq, i) => {
-          const o = ctx.createOscillator(), g = ctx.createGain();
-          o.type = i ? "sine" : "triangle"; o.frequency.value = freq;
-          g.gain.setValueAtTime(0.0001, ctx.currentTime);
-          g.gain.exponentialRampToValueAtTime(i ? 0.06 : 0.2, ctx.currentTime + 0.05);
-          g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.9);
-          o.connect(g); g.connect(gainRef.current); o.start(); o.stop(ctx.currentTime + 2);
+      if (!kit.current) {
+        const ctx = new AC();
+        const master = ctx.createGain();
+        master.gain.value = 0.0001;
+
+        /* rounds off the top end so nothing is sharp or tinny */
+        const warm = ctx.createBiquadFilter();
+        warm.type = "lowpass"; warm.frequency.value = 2400; warm.Q.value = 0.4;
+
+        /* a short echo gives the notes room to breathe */
+        const delay = ctx.createDelay(1);
+        delay.delayTime.value = 0.34;
+        const fb = ctx.createGain(); fb.gain.value = 0.28;
+        const wet = ctx.createGain(); wet.gain.value = 0.32;
+        delay.connect(fb); fb.connect(delay); delay.connect(wet);
+
+        warm.connect(master); wet.connect(master); master.connect(ctx.destination);
+
+        /* a barely-there pad underneath so the rests aren't silent */
+        const pad = ctx.createGain(); pad.gain.value = 0.05;
+        pad.connect(warm);
+        [130.81, 196.0].forEach((f, i) => {
+          const o = ctx.createOscillator();
+          o.type = "sine"; o.frequency.value = f;
+          o.detune.value = i ? 6 : -6;
+          o.connect(pad); o.start();
         });
+
+        kit.current = { ctx, master, warm, delay };
+      }
+      const { ctx, master, warm, delay } = kit.current;
+      if (ctx.state === "suspended") ctx.resume();
+      master.gain.cancelScheduledValues(ctx.currentTime);
+      master.gain.setValueAtTime(Math.max(master.gain.value, 0.0001), ctx.currentTime);
+      master.gain.linearRampToValueAtTime(vol(), ctx.currentTime + 2.2);   // fades in, never starts abruptly
+
+      const note = () => {
+        const semi = MOTIF[step.current % MOTIF.length];
         step.current++;
+        if (semi == null) return;                       // rest
+        const f = 261.63 * Math.pow(2, semi / 12);
+        const t = ctx.currentTime;
+        /* two voices an octave apart = the music-box shimmer */
+        [[f, "triangle", 0.16], [f * 2, "sine", 0.05]].forEach(([freq, type, peak]) => {
+          const o = ctx.createOscillator(), g = ctx.createGain();
+          o.type = type; o.frequency.value = freq;
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.exponentialRampToValueAtTime(peak, t + 0.04);   // quick strike
+          g.gain.exponentialRampToValueAtTime(0.0001, t + 2.8);  // long, soft tail
+          o.connect(g); g.connect(warm); g.connect(delay);
+          o.start(t); o.stop(t + 3);
+        });
       };
-      play();
+      note();
       clearInterval(timer.current);
-      timer.current = setInterval(play, 620);
+      timer.current = setInterval(note, STEP_MS);
       setPlaying(true);
     } catch (e) { setPlaying(false); }
-  }, [muted]);
+  }, [src, muted]);
 
   useEffect(() => {
-    if (!gainRef.current || !ctxRef.current) return;
-    try { gainRef.current.gain.linearRampToValueAtTime(muted ? 0.0001 : 0.16, ctxRef.current.currentTime + 0.25); } catch (e) {}
+    if (audio.current) audio.current.volume = muted ? 0 : 0.55;
+    const k = kit.current;
+    if (k) { try { k.master.gain.linearRampToValueAtTime(muted ? 0.0001 : 0.14, k.ctx.currentTime + 0.35); } catch (e) {} }
   }, [muted]);
 
-  useEffect(() => () => { clearInterval(timer.current); try { ctxRef.current && ctxRef.current.close(); } catch (e) {} }, []);
+  useEffect(() => () => {
+    clearInterval(timer.current);
+    if (audio.current) audio.current.pause();
+    try { kit.current && kit.current.ctx.close(); } catch (e) {}
+  }, []);
+
   return { playing, muted, setMuted, start, stop };
 }
 
-function MusicPill({ song, onClose }) {
+function MusicPill({ song, onClose, label }) {
   return (
     <div className={"music" + (song.playing && !song.muted ? "" : " paused")}>
       <span className="eq" aria-hidden="true"><i /><i /><i /></span>
       <button className="label" onClick={() => (song.playing ? song.stop() : song.start())} style={{ fontWeight: 800 }}>
-        {song.playing ? (song.muted ? "Muted" : "♫ Playing your birthday song") : "♫ Play the song"}
+        {song.playing ? (song.muted ? "Muted" : "♫ " + (label || "Playing your birthday song")) : "♫ Play the song"}
       </button>
       {song.playing && (
         <button onClick={() => song.setMuted(!song.muted)} aria-label={song.muted ? "Unmute" : "Mute"} style={{ opacity: .6, display: "flex" }}>
@@ -1220,7 +1288,7 @@ function BirthdayExperience({ p, contained = false, startOpen = false, withMusic
   const locked = Boolean(p.lockUntilBirthday) && !contained && !startOpen && birthdayInfo(p.date).status === "up";
   const [open, setOpen] = useState(startOpen);
   const [showMusic, setShowMusic] = useState(true);
-  const song = useSong();
+  const song = useSong(p.music ? p.musicSrc || "" : "");
   const scroller = useRef(null);
   const cel = useRef(null);
 
@@ -1265,7 +1333,7 @@ function BirthdayExperience({ p, contained = false, startOpen = false, withMusic
           <FinalWish p={p} theme={theme} onCelebrate={celebrate} onReplay={replay} />
         </div>
       )}
-      {open && p.music && showMusic && withMusic && <MusicPill song={song} onClose={() => { song.stop(); setShowMusic(false); }} />}
+      {open && p.music && showMusic && withMusic && <MusicPill song={song} label={p.musicName && !p.musicName.startsWith("Linked") ? p.musicName.replace(/\.[a-z0-9]+$/i, "") : ""} onClose={() => { song.stop(); setShowMusic(false); }} />}
     </div>
   );
 }
@@ -1597,7 +1665,7 @@ function QuickCreate({ list, onContinue, onManual, toast }) {
 const emptyDraft = () => ({
   id: "", slug: "", name: "", nickname: "", date: todayISO(), relationship: "Friend",
   theme: "rose", backdrop: "aurora", spark: "confetti", subtitle: "", message: "", quote: "",
-  finalNote: "", music: true, cake: true, scratch: true, lockUntilBirthday: false,
+  finalNote: "", music: true, musicSrc: "", musicName: "", cake: true, scratch: true, lockUntilBirthday: false,
   from: "Aarav", photo: "", memories: [], timeline: [], views: 0, seed: "",
 });
 
@@ -1682,12 +1750,26 @@ function ThemeSelector({ value, onChange }) {
 
 function BirthdayForm({ initial, list, onSave, onCancel, toast, onPreviewFull }) {
   const isEdit = Boolean(initial && initial.id);
+  const audioFile = useRef(null);
+  const [ownAudio, setOwnAudio] = useState(Boolean(initial && initial.musicSrc));
   const [draft, setDraft] = useState(() => (initial ? { ...emptyDraft(), ...initial } : emptyDraft()));
   const [errs, setErrs] = useState({});
   const [saving, setSaving] = useState(false);
   const set = (patch) => setDraft((d) => ({ ...d, ...patch }));
 
   const slug = useMemo(() => uniqueSlug(slugify(draft.nickname || draft.name), list, draft.id), [draft.name, draft.nickname, list, draft.id]);
+
+  const pickAudio = (e) => {
+    const file = (e.target.files || [])[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > 4 * 1024 * 1024) { toast("That file is over 4 MB — use a shorter clip or a link.", "bad"); return; }
+    if (file.size > 1024 * 1024) toast("Large file — a hosted link saves more reliably.");
+    const fr = new FileReader();
+    fr.onerror = () => toast("Couldn't read that audio file.", "bad");
+    fr.onload = () => set({ music: true, musicSrc: fr.result, musicName: file.name });
+    fr.readAsDataURL(file);
+  };
 
   const [live, setLive] = useState(draft);
   useEffect(() => { const t = setTimeout(() => setLive(draft), 320); return () => clearTimeout(t); }, [draft]);
@@ -1864,10 +1946,33 @@ function BirthdayForm({ initial, list, onSave, onCancel, toast, onPreviewFull })
             <div className="field">
               <label>Music</label>
               <div className="seg">
-                <button className={draft.music ? "on" : ""} onClick={() => set({ music: true })}>Play a soft melody</button>
-                <button className={!draft.music ? "on" : ""} onClick={() => set({ music: false })}>No music</button>
+                <button className={draft.music && !ownAudio ? "on" : ""} onClick={() => { setOwnAudio(false); set({ music: true, musicSrc: "", musicName: "" }); }}>Soft melody</button>
+                <button className={draft.music && ownAudio ? "on" : ""} onClick={() => { setOwnAudio(true); set({ music: true }); }}>Your audio</button>
+                <button className={!draft.music ? "on" : ""} onClick={() => { setOwnAudio(false); set({ music: false, musicSrc: "", musicName: "" }); }}>None</button>
               </div>
-              <span className="hint">Starts only after they tap open — never before.</span>
+              <span className="hint">
+                {!draft.music ? "The page stays silent."
+                  : ownAudio ? "Loops quietly from the start of the page. They can pause or mute any time."
+                  : "A slow music-box melody, played in their browser. No file needed."}
+              </span>
+              {draft.music && ownAudio && (
+                <div style={{ marginTop: 12 }}>
+                  <button className="btn btn-s btn-w" style={{ padding: "12px", fontSize: 13.5 }} onClick={() => audioFile.current.click()}>
+                    <Icon d={I.spark} size={16} /> {draft.musicName ? "Replace audio file" : "Upload an audio file"}
+                  </button>
+                  <input ref={audioFile} type="file" accept="audio/*" hidden onChange={pickAudio} />
+                  <input className="inp" style={{ marginTop: 8, fontSize: 13.5 }} placeholder="…or paste a direct link to an MP3"
+                    value={draft.musicSrc.startsWith("data:") ? "" : draft.musicSrc}
+                    onChange={(e) => set({ musicSrc: e.target.value.trim(), musicName: e.target.value ? "Linked track" : "" })} />
+                  {draft.musicSrc && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, fontSize: 13, fontWeight: 700 }}>
+                      <span style={{ flex: 1 }}>♫ {draft.musicName || "Custom audio"}</span>
+                      <button onClick={() => set({ musicSrc: "", musicName: "" })} style={{ color: "var(--ink-2)" }}>Remove</button>
+                    </div>
+                  )}
+                </div>
+              )}
+              <span className="hint" style={{ marginTop: 8 }}>Nothing plays until they tap open — browsers block it otherwise.</span>
             </div>
           </div>
 
