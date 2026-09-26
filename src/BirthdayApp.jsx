@@ -2018,7 +2018,21 @@ function NotFound({ onHome }) {
 export default function App() {
   const { list, setList, loading, failed } = useProfiles();
   const [authed, setAuthed] = useState(false);
-  const firstRoute = useRef((typeof window !== "undefined" ? window.location.hash : "").replace(/^#\/?/, "").split("/").filter(Boolean));
+  const getRouteParts = () => {
+    if (typeof window === "undefined") return [];
+
+    const hashParts = (window.location.hash || "").replace(/^#\/?/, "").split("/").filter(Boolean);
+    if (hashParts[0] === "birthday" && hashParts[1]) return ["birthday", hashParts[1]];
+    if (hashParts[0] === "new") return ["new"];
+
+    const pathParts = window.location.pathname.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
+    if (pathParts[0] === "birthday" && pathParts[1]) return ["birthday", pathParts[1]];
+    if (pathParts[0] === "new") return ["new"];
+
+    return [];
+  };
+
+  const firstRoute = useRef(getRouteParts());
   const [view, setView] = useState(() => (firstRoute.current[0] === "birthday" && firstRoute.current[1] ? "birthday" : "dash"));  // dash | quick | form | account | birthday
   const [slug, setSlug] = useState(() => (firstRoute.current[0] === "birthday" ? firstRoute.current[1] || "" : ""));
   const [editing, setEditing] = useState(null);
@@ -2038,14 +2052,18 @@ export default function App() {
 
   useEffect(() => {
     const read = () => {
-      const parts = (window.location.hash || "").replace(/^#\/?/, "").split("/").filter(Boolean);
+      const parts = getRouteParts();
       if (parts[0] === "birthday" && parts[1]) { setSlug(parts[1]); setView("birthday"); }
       else if (parts[0] === "new") { setEditing(null); setView("quick"); }
       else if (parts.length === 0) setView("dash");
     };
     read();
     window.addEventListener("hashchange", read);
-    return () => window.removeEventListener("hashchange", read);
+    window.addEventListener("popstate", read);
+    return () => {
+      window.removeEventListener("hashchange", read);
+      window.removeEventListener("popstate", read);
+    };
   }, []);
 
   const openPage = (p) => { setSheet(null); setSlug(p.slug); setView("birthday"); goHash("/birthday/" + p.slug); window.scrollTo(0, 0); };
