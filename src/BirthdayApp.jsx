@@ -568,9 +568,15 @@ function hydrateProfile(record) {
   };
 }
 
+function makeProfileId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "p" + Date.now() + Math.random().toString(16).slice(2);
+}
+
 function serializeProfile(profile) {
+  const id = profile.id && /^[0-9a-fA-F-]{36}$/.test(String(profile.id)) ? profile.id : makeProfileId();
   return {
-    id: profile.id,
+    id,
     slug: profile.slug,
     name: profile.name,
     nickname: profile.nickname || "",
@@ -617,7 +623,7 @@ async function saveProfileToSupabase(profile) {
   const payload = serializeProfile(profile);
   const { data, error } = await supabase
     .from("profiles")
-    .upsert(payload, { onConflict: "id" })
+    .upsert(payload, { onConflict: "slug" })
     .select();
 
   if (error) throw error;
@@ -1886,14 +1892,17 @@ function BirthdayForm({ initial, list, onSave, onCancel, toast, onPreviewFull })
     setSaving(true);
     setTimeout(() => {
       setSaving(false);
-      onSave({
-        ...draft, slug,
-        id: draft.id || "p" + Date.now(),
+      const normalizedProfile = {
+        ...draft,
+        slug,
+        id: draft.id && /^[0-9a-fA-F-]{36}$/.test(String(draft.id)) ? draft.id : makeProfileId(),
         createdAt: draft.createdAt || todayISO(),
         photo: draft.photo || artwork(draft.name, draft.theme, initials(draft.name)),
         memories: draft.memories.map((m, i) => ({ ...m, id: m.id || "m" + i })),
         timeline: draft.timeline.filter((t) => t.year || t.text),
-      }, !isEdit);
+      };
+
+      onSave(normalizedProfile, !isEdit);
     }, 700);
   };
 
