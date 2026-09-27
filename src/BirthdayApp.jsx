@@ -600,6 +600,8 @@ function serializeProfile(profile) {
 }
 
 async function fetchProfilesFromSupabase() {
+  if (!supabase) throw new Error("Supabase not configured");
+
   const { data, error } = await supabase
     .from("profiles")
     .select("*")
@@ -610,6 +612,8 @@ async function fetchProfilesFromSupabase() {
 }
 
 async function saveProfileToSupabase(profile) {
+  if (!supabase) throw new Error("Supabase not configured");
+
   const payload = serializeProfile(profile);
   const { data, error } = await supabase
     .from("profiles")
@@ -621,6 +625,8 @@ async function saveProfileToSupabase(profile) {
 }
 
 async function deleteProfileFromSupabase(id) {
+  if (!supabase) throw new Error("Supabase not configured");
+
   const { error } = await supabase.from("profiles").delete().eq("id", id);
   if (error) throw error;
 }
