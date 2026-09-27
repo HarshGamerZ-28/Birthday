@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, useImperativeHandle } from "react";
+import { supabase } from "./lib/supabase";
 
 /* ============================================================
    Wishcraft — a personal birthday gift, delivered as a link
@@ -536,36 +537,121 @@ const SAMPLE = [
 ];
 
 /* ============================ STORE ============================ */
-const STORE_KEY = "wishcraft:profiles:v1";
+function hydrateProfile(record) {
+  if (!record) return null;
+  return {
+    id: record.id,
+    slug: record.slug || "",
+    name: record.name || "",
+    nickname: record.nickname || "",
+    date: record.date || "",
+    relationship: record.relationship || "Best Friend",
+    theme: record.theme || "rose",
+    backdrop: record.backdrop || "aurora",
+    spark: record.spark || "confetti",
+    createdAt: record.created_at || record.createdAt || new Date().toISOString(),
+    views: Number(record.views || 0),
+    subtitle: record.subtitle || "",
+    message: record.message || "",
+    quote: record.quote || "",
+    finalNote: record.final_note || record.finalNote || "",
+    from: record.from_name || record.from || "",
+    photo: record.photo || "",
+    memories: Array.isArray(record.memories) ? record.memories : [],
+    timeline: Array.isArray(record.timeline) ? record.timeline : [],
+    music: Boolean(record.music),
+    musicSrc: record.music_src || record.musicSrc || "",
+    musicName: record.music_name || record.musicName || "",
+    lockUntilBirthday: Boolean(record.lock_until_birthday || record.lockUntilBirthday),
+    cake: Boolean(record.cake),
+    scratch: Boolean(record.scratch),
+  };
+}
+
+function serializeProfile(profile) {
+  return {
+    id: profile.id,
+    slug: profile.slug,
+    name: profile.name,
+    nickname: profile.nickname || "",
+    date: profile.date || "",
+    relationship: profile.relationship || "Best Friend",
+    theme: profile.theme || "rose",
+    backdrop: profile.backdrop || "aurora",
+    spark: profile.spark || "confetti",
+    subtitle: profile.subtitle || "",
+    message: profile.message || "",
+    quote: profile.quote || "",
+    final_note: profile.finalNote || "",
+    from_name: profile.from || "",
+    photo: profile.photo || "",
+    created_at: profile.createdAt || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    views: Number(profile.views || 0),
+    music: Boolean(profile.music),
+    music_src: profile.musicSrc || "",
+    music_name: profile.musicName || "",
+    lock_until_birthday: Boolean(profile.lockUntilBirthday),
+    cake: Boolean(profile.cake),
+    scratch: Boolean(profile.scratch),
+    memories: Array.isArray(profile.memories) ? profile.memories : [],
+    timeline: Array.isArray(profile.timeline) ? profile.timeline : [],
+  };
+}
+
+async function fetchProfilesFromSupabase() {
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) throw error;
+  return (data || []).map(hydrateProfile);
+}
+
+async function saveProfileToSupabase(profile) {
+  const payload = serializeProfile(profile);
+  const { data, error } = await supabase
+    .from("profiles")
+    .upsert(payload, { onConflict: "id" })
+    .select();
+
+  if (error) throw error;
+  return (data || []).map(hydrateProfile)[0] || hydrateProfile(payload);
+}
+
+async function deleteProfileFromSupabase(id) {
+  const { error } = await supabase.from("profiles").delete().eq("id", id);
+  if (error) throw error;
+}
+
 function useProfiles() {
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
-  const ready = useRef(false);
 
   useEffect(() => {
     let alive = true;
     (async () => {
-      let data = SAMPLE;
       try {
-        const res = await window.storage.get(STORE_KEY);
-        const parsed = JSON.parse(res.value);
-        if (Array.isArray(parsed) && parsed.length) data = parsed;
-      } catch (e) { /* first run or storage unavailable — seed with samples */ }
-      await new Promise((r) => setTimeout(r, 620));
-      if (!alive) return;
-      setList(data); setLoading(false); ready.current = true;
+        const data = await fetchProfilesFromSupabase();
+        if (!alive) return;
+        setList(data);
+        setFailed(false);
+      } catch (e) {
+        console.error("Supabase fetch failed", e);
+        if (!alive) return;
+        setList(SAMPLE);
+        setFailed(true);
+      } finally {
+        if (alive) setLoading(false);
+      }
     })();
-    return () => { alive = false; };
-  }, []);
 
-  useEffect(() => {
-    if (!ready.current) return;
-    (async () => {
-      try { await window.storage.set(STORE_KEY, JSON.stringify(list)); setFailed(false); }
-      catch (e) { setFailed(true); }
-    })();
-  }, [list]);
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   return { list, setList, loading, failed };
 }
@@ -2069,18 +2155,33 @@ export default function App() {
   const openPage = (p) => { setSheet(null); setSlug(p.slug); setView("birthday"); goHash("/birthday/" + p.slug); window.scrollTo(0, 0); };
   const backToStudio = () => { setView("dash"); setSheet(null); goHash("/"); window.scrollTo(0, 0); };
 
-  const save = (profile, isNew) => {
-    setList((l) => (isNew ? [profile, ...l] : l.map((x) => (x.id === profile.id ? profile : x))));
-    setEditing(null);
-    setView("dash");
-    setSheet(profile);
-    setFresh(isNew);
-    toast(isNew ? "Page created 🎉" : "Changes saved");
+  const save = async (profile, isNew) => {
+    try {
+      const saved = await saveProfileToSupabase(profile);
+      setList((l) => (isNew ? [saved, ...l.filter((x) => x.id !== saved.id)] : l.map((x) => (x.id === saved.id ? saved : x))));
+      setEditing(null);
+      setView("dash");
+      setSheet(saved);
+      setFresh(isNew);
+      toast(isNew ? "Page created 🎉" : "Changes saved");
+      return saved;
+    } catch (e) {
+      console.error("Save profile failed", e);
+      setList((l) => (isNew ? [profile, ...l] : l.map((x) => (x.id === profile.id ? profile : x))));
+      toast("Could not save page to cloud", "bad");
+      return null;
+    }
   };
-  const remove = (p) => {
-    setList((l) => l.filter((x) => x.id !== p.id));
-    setSheet(null);
-    toast(p.name.split(" ")[0] + "'s page deleted");
+  const remove = async (p) => {
+    try {
+      await deleteProfileFromSupabase(p.id);
+      setList((l) => l.filter((x) => x.id !== p.id));
+      setSheet(null);
+      toast(p.name.split(" ")[0] + "'s page deleted");
+    } catch (e) {
+      console.error("Delete profile failed", e);
+      toast("Could not delete page", "bad");
+    }
   };
 
   /* public birthday link — no sign-in needed */
